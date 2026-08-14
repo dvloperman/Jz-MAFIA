@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mafia Game - Engine Core</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        body { background: #121218; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; transition: background 0.8s ease; }
+        
+        /* ثيمات الليل والنهار */
+        body.day-theme { background: #2c3e50; }
+        body.night-theme { background: #090a10; }
+
+        .container { background: #1e1e2a; padding: 25px; border-radius: 12px; width: 500px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); transition: background 0.8s ease; }
+        .day-theme .container { background: #34495e; }
+        .night-theme .container { background: #151622; }
+
+        h2, h3 { text-align: center; color: #e94560; margin-top: 0; }
+        input, select, button { width: 100%; padding: 10px; margin: 6px 0; border-radius: 6px; border: none; font-size: 14px; }
+        input, select { background: #16213e; color: #fff; border: 1px solid #0f3460; }
+        button { background: #e94560; color: white; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        button:hover { background: #ff2e63; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        
+        .hidden { display: none; }
+        .badge { padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; display: inline-block; }
+        .role-mafia { background: #e74c3c; color: white; }
+        .role-doctor { background: #2ecc71; color: white; }
+        .role-citizen { background: #3498db; color: white; }
+
+        #chat-box { background: rgba(0,0,0,0.3); height: 180px; overflow-y: auto; padding: 10px; border-radius: 6px; margin: 10px 0; display: flex; flex-direction: column; gap: 6px; }
+        .msg { background: rgba(255,255,255,0.05); padding: 6px 10px; border-radius: 6px; font-size: 13px; }
+        .system-msg { color: #f1c40f; font-style: italic; font-size: 12px; text-align: center; }
+
+        .phase-header { text-align: center; background: rgba(0,0,0,0.4); padding: 10px; border-radius: 6px; margin-bottom: 10px; }
+        .timer { font-size: 24px; font-weight: bold; color: #f39c12; }
+    </style>
+</head>
+<body class="night-theme">
+
+<div class="container">
+    <h2>🕵️‍♂️ لعبة المافيا - الشات واللوبي</h2>
+
+    <!-- شاشة الدخول -->
+    <div id="join-screen">
+        <input type="text" id="username" placeholder="ادخل اسمك..." />
+        <button onclick="createRoom()">إنشاء غرفة (Host)</button>
+        <hr style="border: 0.5px solid #2c3e50; margin: 15px 0;">
+        <input type="text" id="room-code" placeholder="رمز الغرفة للإنضمام..." />
+        <button onclick="joinRoom()">انضمام للغرفة</button>
+    </div>
+
+    <!-- شاشة اللوبي وإعدادات اللعبة -->
+    <div id="lobby-screen" class="hidden">
+        <div style="background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px; text-align: center; margin-bottom: 10px;">
+            رمز الغرفة: <b id="display-room-id" style="color: #00adb5;">-</b>
+        </div>
+
+        <!-- إعدادات الهوست فقط -->
+        <div id="host-settings" class="hidden" style="background: rgba(255,255,255,0.05); padding: 10px; border-radius: 6px; margin-bottom: 10px;">
+            <h4 style="margin:0 0 8px 0;">⚙️ إعدادات الجولة (Host)</h4>
+            <label>عدد المافيا:</label>
+            <select id="setting-mafia">
+                <option value="1">1 مافيا</option>
+                <option value="2">2 مافيا</option>
+            </select>
+            <label>وجود الطبيب؟</label>
+            <select id="setting-doctor">
+                <option value="true">نعم</option>
+                <option value="false">لا</option>
+            </select>
+            <label>وقت النقاش (بالثواني):</label>
+            <input type="number" id="setting-time" value="30" min="10" max="180">
+            <button onclick="startGame()" style="background: #27ae60; margin-top: 10px;">🚀 بدء اللعبة</button>
+        </div>
+
+        <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px;">
+            <b>اللاعبون متواجدون (<span id="player-count">0</span>):</b>
+            <ul id="players-list" style="margin: 5px 0; padding-right: 20px;"></ul>
+        </div>
+    </div>
+
+    <!-- شاشة اللعب النشطة -->
+    <div id="game-screen" class="hidden">
+        <div class="phase-header">
+            <h3 id="phase-title">🌙 الليل</h3>
+            <div id="timer-display" class="timer">--</div>
+            <div>دورك السري: <span id="my-role" class="badge">...</span></div>
+        </div>
+
+        <div id="chat-box"></div>
+        
+        <div style="display: flex; gap: 5px;">
+            <input type="text" id="chat-input" placeholder="اكتب رسالتك..." onkeypress="if(event.key==='Enter') sendChat()">
+            <button onclick="sendChat()" style="width: 80px;">إرسال</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    let peer = null;
+    let conn = null;
+    let connections = []; // للـ Host
+    let username = "";
+    let isHost = false;
+    let playersList = []; // [{id, name, role}]
+    let myRole = "مواطن";
+    let gameTimer = null;
+
+    function initPeer(customId = null) {
+        peer = customId ? new Peer(customId) : new Peer();
+
+        peer.on('open', (id) => {
+            document.getElementById('display-room-id').innerText = id;
+            if (isHost) {
+                playersList.push({ id, name: username, role: '' });
+                updatePlayersUI();
+                document.getElementById('host-settings').classList.remove('hidden');
+            }
+        });
+
+        peer.on('connection', (c) => {
+            connections.push(c);
+            setupConnection(c);
+        });
+    }
+
+    function createRoom() {
+        username = document.getElementById('username').value.trim() || "لاعب 1";
+        isHost = true;
+        switchScreen('lobby-screen');
+        const randomCode = "mafia-" + Math.floor(1000 + Math.random() * 9000);
+        initPeer(randomCode);
+    }
+
+    function joinRoom() {
+        username = document.getElementById('username').value.trim() || "لاعب";
+        const roomCode = document.getElementById('room-code').value.trim();
+        if (!roomCode) return alert("حط رمز الغرفة!");
+
+        isHost = false;
+        switchScreen('lobby-screen');
+        peer = new Peer();
+
+        peer.on('open', () => {
+            conn = peer.connect(roomCode);
+            setupConnection(conn);
+        });
+    }
+
+    function setupConnection(c) {
+        c.on('open', () => {
+            c.send({ type: 'join', name: username });
+        });
+
+        c.on('data', (data) => {
+            if (data.type === 'chat') {
+                appendMsg(data.sender, data.text);
+            } else if (data.type === 'players-update') {
+                playersList = data.players;
+                updatePlayersUI();
+            } else if (data.type === 'join' && isHost) {
+                playersList.push({ id: c.peer, name: data.name, role: '' });
+                broadcastPlayers();
+            } else if (data.type === 'game-start') {
+                myRole = data.role;
+                startClientGameUI();
+            } else if (data.type === 'phase-change') {
+                setPhaseUI(data.phase, data.duration);
+            }
+        });
+
+        c.on('close', () => {
+            if (isHost) {
+                connections = connections.filter(conn => conn.peer !== c.peer);
+                playersList = playersList.filter(p => p.id !== c.peer);
+                broadcastPlayers();
+            }
+        });
+    }
+
+    /* ---------------- منطق بدء اللعبة وتوزيع الأدوار (Host Only) ---------------- */
+    function startGame() {
+        const mafiaCount = parseInt(document.getElementById('setting-mafia').value);
+        const hasDoctor = document.getElementById('setting-doctor').value === 'true';
+
+        if (playersList.length < (mafiaCount + (hasDoctor ? 1 : 0) + 1)) {
+            alert(`عدد اللاعبين غير كافي! تحتاج على الأقل ${mafiaCount + (hasDoctor ? 1 : 0) + 1} لاعبين لهذه الإعدادات.`);
+            return;
+        }
+
+        // 1. خلط ترتيب اللاعبين عشوائياً
+        let shuffled = [...playersList].sort(() => Math.random() - 0.5);
+
+        // 2. تعيين الأدوار
+        for (let i = 0; i < shuffled.length; i++) {
+            if (i < mafiaCount) {
+                shuffled[i].role = "مافيا";
+            } else if (hasDoctor && i === mafiaCount) {
+                shuffled[i].role = "طبيب";
+            } else {
+                shuffled[i].role = "مواطن";
+            }
+        }
+
+        playersList = shuffled;
+
+        // 3. إرسال الدور لكل لاعب بشكل سري
+        playersList.forEach(player => {
+            if (player.id === peer.id) {
+                myRole = player.role;
+            } else {
+                const pConn = connections.find(c => c.peer === player.id);
+                if (pConn) {
+                    pConn.send({ type: 'game-start', role: player.role });
+                }
+            }
+        });
+
+        startClientGameUI();
+        // البدء بمرحلة الليل
+        startPhase('night', 15);
+    }
+
+    function startPhase(phase, duration) {
+        broadcastData({ type: 'phase-change', phase: phase, duration: duration });
+        setPhaseUI(phase, duration);
+
+        // منطق النقال التلقائي بين الليل والنهار
+        if (isHost) {
+            clearInterval(gameTimer);
+            let timeTotal = duration;
+            gameTimer = setInterval(() => {
+                timeTotal--;
+                if (timeTotal <= 0) {
+                    clearInterval(gameTimer);
+                    // التبديل الدوري
+                    const talkTime = parseInt(document.getElementById('setting-time').value);
+                    if (phase === 'night') {
+                        startPhase('day', talkTime);
+                    } else {
+                        startPhase('night', 15);
+                    }
+                }
+            }, 1000);
+        }
+    }
+
+    function setPhaseUI(phase, duration) {
+        switchScreen('game-screen');
+        const body = document.body;
+        const title = document.getElementById('phase-title');
+        const roleSpan = document.getElementById('my-role');
+
+        roleSpan.innerText = myRole;
+        roleSpan.className = `badge role-${myRole === 'مافيا' ? 'mafia' : myRole === 'طبيب' ? 'doctor' : 'citizen'}`;
+
+        if (phase === 'day') {
+            body.className = 'day-theme';
+            title.innerText = "☀️ النهار (وقت النقاش والتحقيق)";
+            appendMsg('النظام', '☀️ حلّ النهار! ناقشوا مع بعضكم واكتشفوا المافيا.', true);
+        } else {
+            body.className = 'night-theme';
+            title.innerText = "🌙 الليل (المافيا والطبيب ينفذون دورهم)";
+            appendMsg('النظام', '🌙 حلّ الليل! نام الجميع واستيقظت المافيا...', true);
+        }
+
+        // تشغيل العداد التنازلي البصري
+        let timeLeft = duration;
+        const timerDisplay = document.getElementById('timer-display');
+        timerDisplay.innerText = timeLeft + "s";
+        
+        const localInterval = setInterval(() => {
+            timeLeft--;
+            if (timeLeft >= 0) {
+                timerDisplay.innerText = timeLeft + "s";
+            } else {
+                clearInterval(localInterval);
+            }
+        }, 1000);
+    }
+
+    function startClientGameUI() {
+        switchScreen('game-screen');
+    }
+
+    /* ---------------- أدوات الشات والشبكة ---------------- */
+    function sendChat() {
+        const input = document.getElementById('chat-input');
+        const text = input.value.trim();
+        if (!text) return;
+
+        if (isHost) {
+            appendMsg(username, text);
+            broadcastData({ type: 'chat', sender: username, text: text });
+        } else if (conn) {
+            conn.send({ type: 'chat', sender: username, text: text });
+            appendMsg(username, text);
+        }
+        input.value = '';
+    }
+
+    function broadcastData(data) {
+        connections.forEach(c => c.send(data));
+    }
+
+    function broadcastPlayers() {
+        updatePlayersUI();
+        broadcastData({ type: 'players-update', players: playersList });
+    }
+
+    function appendMsg(sender, text, isSystem = false) {
+        const box = document.getElementById('chat-box');
+        const div = document.createElement('div');
+        if (isSystem) {
+            div.className = 'system-msg';
+            div.innerText = text;
+        } else {
+            div.className = 'msg';
+            div.innerHTML = `<b>${sender}:</b> ${text}`;
+        }
+        box.appendChild(div);
+        box.scrollTop = box.scrollHeight;
+    }
+
+    function updatePlayersUI() {
+        document.getElementById('player-count').innerText = playersList.length;
+        const ul = document.getElementById('players-list');
+        ul.innerHTML = '';
+        playersList.forEach(p => {
+            const li = document.createElement('li');
+            li.innerText = p.name;
+            ul.appendChild(li);
+        });
+    }
+
+    function switchScreen(screenId) {
+        document.getElementById('join-screen').classList.add('hidden');
+        document.getElementById('lobby-screen').classList.add('hidden');
+        document.getElementById('game-screen').classList.add('hidden');
+        
+        document.getElementById(screenId).classList.remove('hidden');
+    }
+</script>
+</body>
+</html>
